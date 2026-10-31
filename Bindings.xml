@@ -1,0 +1,4 @@
+<Bindings>
+	<Binding name="CLICK TomeToggleButton:LeftButton" header="TOME">
+	</Binding>
+</Bindings>

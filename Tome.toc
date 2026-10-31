@@ -1,0 +1,8 @@
+## Interface: 16001, 120100, 120105, 120107
+## Title: Tome
+## Notes: One set of tabs on your character, spellbook, talents, guild, collections and group finder windows, plus bags. Works in combat.
+## Version: 0.1.0
+## IconTexture: Interface\Icons\INV_Misc_Book_09
+## SavedVariablesPerCharacter: TomeCharDB
+
+Tome.lua
