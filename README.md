@@ -31,4 +31,8 @@ If you'd rather have the tabs down the right side, type `/tome side`, and `/tome
 
 Open your character sheet and click through every tab, including Bags. Then go hit a training dummy and do it again, keybind included. Nothing should complain, and you shouldn't see any "action blocked" messages.
 
-If something breaks, type `/console scriptErrors 1` and then `/reload` so errors show up on screen, and send me a screenshot.
+If something breaks, type `/console scriptErrors 1` and then `/reload` so errors show up on screen, then send me a screenshot or [open an issue](../../issues).
+
+## License
+
+Tome is free software. You can share it and change it under the GNU General Public License, version 3 or any later version. The full text is in [LICENSE](LICENSE).

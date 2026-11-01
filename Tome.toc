@@ -2,6 +2,7 @@
 ## Title: Tome
 ## Notes: One set of tabs on your character, spellbook, talents, guild, collections and group finder windows, plus bags. Works in combat.
 ## Version: 0.1.0
+## X-License: GPL-3.0-or-later
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
 ## SavedVariablesPerCharacter: TomeCharDB
 
