@@ -40,12 +40,16 @@ local POSITIONS = {
 local DEFAULT_TAB = "character"
 local TOP_TAB_HEIGHT = 26
 local TOP_ART_SCALE = 0.75 -- Blizzard's top tabs reuse the bottom-tab art, flipped, at 75% height
+local TOP_ROW_LEFT = 58 -- the row starts right of the window's portrait
+local TOP_TAB_GAP = 2
+local COMPACT_TAB_WIDTH = 38 -- a top tab with just its icon
+local GEAR_ROOM = 30 -- the settings gear at the end of the row or column
 
 local db
 local ready = false
 local pendingCombat = false
 local positionSetting, settingsCategory
-local bars = {} -- [window] = { panel, row, column, topTabs, sideTabs, sideOffset }
+local bars = {} -- [window] = { panel, row, column, topTabs, sideTabs, rowWidth, columnHeight, sideX, sideY }
 local ourFrames = {} -- frames we parent to Blizzard windows; skipped when measuring their tabs
 
 BINDING_HEADER_TOME = "Tome"
@@ -59,9 +63,13 @@ header:SetAttribute("tome-views", 0)
 header:SetAttribute("tome-last", DEFAULT_TAB)
 
 -- Before a tab's click: close every other open window, then press the target's micro
--- button, unless the target is already the one showing.
+-- button, unless the target is already the one showing. A tab whose micro button is off
+-- does nothing, so it doesn't close the window you're on and then open nothing.
 local TAB_CLICK = [[
 	local want, family = self:GetAttribute("tome-key"), self:GetAttribute("tome-family")
+	if owner:GetAttribute("tome-off-" .. want) then
+		return false
+	end
 	local text, isOpen = "", false
 	for i = 1, owner:GetAttribute("tome-views") do
 		local view = "tome-view" .. i
@@ -96,7 +104,14 @@ local TOGGLE_CLICK = [[
 		end
 	end
 	if text == "" then
-		text = "/click " .. owner:GetAttribute("tome-open-" .. owner:GetAttribute("tome-last"))
+		local last = owner:GetAttribute("tome-last")
+		if owner:GetAttribute("tome-off-" .. last) then
+			last = "character" -- DEFAULT_TAB
+		end
+		if owner:GetAttribute("tome-off-" .. last) then
+			return false
+		end
+		text = "/click " .. owner:GetAttribute("tome-open-" .. last)
 	end
 	self:SetAttribute("macrotext", text)
 ]]
@@ -158,14 +173,41 @@ local function SetTabIcon(texture, tab)
 	end
 end
 
-local function SetTopTabSelected(button, selected)
+-- Blizzard switches a micro button off until you've earned what it opens (Talents until
+-- your first talent point, Group Finder until its level) or while a service is down, and
+-- pressing it then does nothing. Its tab greys out to match.
+local function IsTabOff(tab)
+	return tab.enabled == false
+end
+
+-- The same reason the micro button's own tooltip gives.
+local function OffReason(tab)
+	local button = _G[MicroButtonFor(tab)]
+	if button.factionGroup == "Neutral" then
+		return FEATURE_NOT_AVAILBLE_PANDAREN
+	elseif button.minLevel then
+		return format(FEATURE_BECOMES_AVAILABLE_AT_LEVEL, button.minLevel)
+	end
+	return button.disabledTooltip and GetValueOrCallFunction(button, "disabledTooltip")
+end
+
+local function SetTabTooltip(tooltip, tab)
+	tooltip:SetText(tab.label)
+	local reason = IsTabOff(tab) and OffReason(tab)
+	if reason then
+		tooltip:AddLine(reason, RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b, true)
+	end
+end
+
+local function SetTopTabSelected(button, selected, off)
 	for _, piece in ipairs(button.active) do
 		piece:SetShown(selected)
 	end
 	for _, piece in ipairs(button.inactive) do
 		piece:SetShown(not selected)
 	end
-	button.Text:SetFontObject(selected and GameFontHighlightSmall or GameFontNormalSmall)
+	button.Icon:SetDesaturated(off)
+	button.Text:SetFontObject(off and GameFontDisableSmall or selected and GameFontHighlightSmall or GameFontNormalSmall)
 end
 
 local function Refresh()
@@ -175,13 +217,14 @@ local function Refresh()
 				if tab.key == "character" then
 					SetTabIcon(button.Icon, tab)
 				end
-				SetTopTabSelected(button, IsTabActive(tab, panel))
+				SetTopTabSelected(button, IsTabActive(tab, panel), IsTabOff(tab))
 			end
 			for tab, button in pairs(bar.sideTabs) do
 				if tab.key == "character" then
 					SetTabIcon(button.Icon, tab)
 				end
 				button:SetChecked(IsTabActive(tab, panel))
+				button.Icon:SetDesaturated(IsTabOff(tab))
 			end
 		end
 	end
@@ -198,26 +241,72 @@ local function QueueRefresh()
 	end
 end
 
+-- The tabs' click snippets read which micro buttons are off from the header, and the
+-- header can't change in combat, so a button switching mid-fight is caught up afterwards.
+local function SyncEnabled()
+	for _, tab in ipairs(TABS) do
+		if tab.available then
+			tab.enabled = _G[MicroButtonFor(tab)]:IsEnabled()
+		end
+	end
+	if InCombatLockdown() then
+		pendingCombat = true
+	else
+		for _, tab in ipairs(TABS) do
+			if tab.available and not tab.bags then
+				header:SetAttribute("tome-off-" .. tab.key, IsTabOff(tab) or nil)
+			end
+		end
+	end
+	Refresh()
+end
+
+local syncQueued = false
+local function QueueSync()
+	if not syncQueued then
+		syncQueued = true
+		C_Timer.After(0, function()
+			syncQueued = false
+			SyncEnabled()
+		end)
+	end
+end
+
 ----------------------------------------------------------------------------------------------
 -- Tab position
 
--- Forever's windows keep Blizzard's own tabs down their right edge (Character, Collections,
--- Group Finder), so the side column starts below whatever is already there.
-local function PlaceColumn(bar)
-	if InCombatLockdown() then
-		return
+-- Labels and icons where the window is wide enough for the whole row, otherwise just the
+-- icons, with each label in its tooltip.
+local function FitRow(bar)
+	local compact = bar.rowWidth > bar.panel:GetWidth() - TOP_ROW_LEFT
+	local width = 0
+	for _, tab in ipairs(TABS) do
+		local button = bar.topTabs[tab]
+		if button then
+			button.Text:SetShown(not compact)
+			button:SetWidth(compact and COMPACT_TAB_WIDTH or button.fullWidth)
+			width = width + button:GetWidth() + TOP_TAB_GAP
+		end
 	end
+	bar.row:SetSize(width + GEAR_ROOM, TOP_TAB_HEIGHT)
+end
+
+-- Forever's windows keep Blizzard's own tabs down their right edge (Character, Collections,
+-- Group Finder). The side column goes beside those, level with the first one, and shrinks
+-- to fit a short window.
+local function PlaceColumn(bar)
 	local panel = bar.panel
 	local right, top = panel:GetRight(), panel:GetTop()
 	if panel:IsVisible() and right and top then
-		local lowest
+		local edge, highest
 		local function consider(frame)
 			if ourFrames[frame] or not frame:IsShown() then
 				return
 			end
 			local left, bottom = frame:GetLeft(), frame:GetBottom()
-			if left and bottom and math.abs(left - right) < 8 and bottom < top then
-				lowest = math.min(lowest or bottom, bottom)
+			if left and bottom and math.abs(left - right) < 8 and bottom < top and frame:GetWidth() < 100 then
+				edge = math.max(edge or right, frame:GetRight())
+				highest = math.max(highest or bottom, frame:GetTop())
 			end
 		end
 		for _, child in ipairs({ panel:GetChildren() }) do
@@ -228,18 +317,34 @@ local function PlaceColumn(bar)
 				end
 			end
 		end
-		bar.sideOffset = lowest and math.floor(top - lowest + 12) or 30
+		bar.sideX = edge and math.ceil(edge - right) + 2 or 0
+		bar.sideY = highest and math.max(0, math.floor(top - highest)) or 30
 	end
+	local room = panel:GetHeight() - bar.sideY - 8
+	local scale = math.max(0.5, math.min(1, room / bar.columnHeight))
+	bar.column:SetScale(scale)
 	bar.column:ClearAllPoints()
-	bar.column:SetPoint("TOPLEFT", panel, "TOPRIGHT", 0, -bar.sideOffset)
+	bar.column:SetPoint("TOPLEFT", panel, "TOPRIGHT", bar.sideX / scale, -bar.sideY / scale)
 end
 
 local function ApplyPosition(bar)
 	local onTop = db.position ~= "side"
 	bar.row:SetShown(onTop)
 	bar.column:SetShown(not onTop)
-	if not onTop then
+	if onTop then
+		FitRow(bar)
+	else
 		PlaceColumn(bar)
+	end
+end
+
+-- Moving or resizing the tabs is blocked in combat, so a window that opens or changes size
+-- mid-fight gets its tabs laid out when combat ends.
+local function Layout(bar)
+	if InCombatLockdown() then
+		pendingCombat = true
+	else
+		ApplyPosition(bar)
 	end
 end
 
@@ -334,15 +439,28 @@ local function CreateTopTab(row, tab)
 	button.Text:SetPoint("LEFT", button.Icon, "RIGHT", 4, 0)
 	button.Text:SetText(tab.label)
 
-	button:SetSize(math.ceil(button.Text:GetStringWidth()) + 42, TOP_TAB_HEIGHT)
-	SetTopTabSelected(button, false)
+	button.fullWidth = math.ceil(button.Text:GetStringWidth()) + 42
+	button:SetSize(button.fullWidth, TOP_TAB_HEIGHT)
+	SetTopTabSelected(button, false, false)
 	SetupTabAction(button, tab)
+	button:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		SetTabTooltip(GameTooltip, tab)
+		GameTooltip:Show()
+	end)
+	button:SetScript("OnLeave", GameTooltip_Hide)
 	return button
 end
 
 local function CreateSideTab(column, tab)
 	local button = CreateFrame("Button", nil, column, "LargeSideTabButtonTemplate, SecureActionButtonTemplate")
 	button.tooltipText = tab.label
+	function button:GetTooltipTextSetupFunction()
+		return function(tooltip)
+			SetTabTooltip(tooltip, tab)
+			return true
+		end
+	end
 	SetTabIcon(button.Icon, tab)
 	button:SetFillToInterior(true)
 	button:SetChecked(false)
@@ -366,30 +484,31 @@ local function CreateGearButton(parent)
 end
 
 local function CreateBar(panel)
-	local bar = { panel = panel, topTabs = {}, sideTabs = {}, sideOffset = 30 }
+	local bar = { panel = panel, topTabs = {}, sideTabs = {}, sideX = 0, sideY = 30 }
 
-	-- Along the top, starting right of the portrait.
+	-- Along the top, starting right of the portrait; FitRow sets its width.
 	local row = CreateFrame("Frame", nil, panel)
-	row:SetPoint("BOTTOMLEFT", panel, "TOPLEFT", 58, -2)
+	row:SetPoint("BOTTOMLEFT", panel, "TOPLEFT", TOP_ROW_LEFT, -2)
 	row:SetClampedToScreen(true)
 	local width, previous = 0, nil
 	for _, tab in ipairs(TABS) do
 		if tab.available then
 			local button = CreateTopTab(row, tab)
 			if previous then
-				button:SetPoint("BOTTOMLEFT", previous, "BOTTOMRIGHT", 2, 0)
+				button:SetPoint("BOTTOMLEFT", previous, "BOTTOMRIGHT", TOP_TAB_GAP, 0)
 			else
 				button:SetPoint("BOTTOMLEFT")
 			end
-			width = width + button:GetWidth() + 2
+			width = width + button:GetWidth() + TOP_TAB_GAP
 			bar.topTabs[tab] = button
 			previous = button
 		end
 	end
 	CreateGearButton(row):SetPoint("LEFT", previous, "RIGHT", 6, 0)
-	row:SetSize(width + 30, TOP_TAB_HEIGHT)
+	bar.rowWidth = width + GEAR_ROOM
+	row:SetSize(bar.rowWidth, TOP_TAB_HEIGHT)
 
-	-- Down the right edge; PlaceColumn sets its vertical spot.
+	-- Down the right edge; PlaceColumn sets its spot and scale.
 	local column = CreateFrame("Frame", nil, panel)
 	column:SetClampedToScreen(true)
 	local height, tabWidth = 0, 0
@@ -409,7 +528,8 @@ local function CreateBar(panel)
 		end
 	end
 	CreateGearButton(column):SetPoint("TOP", previous, "BOTTOM", -3, -6)
-	column:SetSize(tabWidth, height + 30)
+	bar.columnHeight = height + GEAR_ROOM
+	column:SetSize(tabWidth, bar.columnHeight)
 
 	bar.row, bar.column = row, column
 	ourFrames[row], ourFrames[column] = true, true
@@ -456,14 +576,17 @@ local function Attach(panelName)
 
 	local bar = CreateBar(panel)
 	bars[panel] = bar
-	ApplyPosition(bar)
+	Layout(bar)
+	-- Blizzard's own side tabs settle a frame after the window shows, and the Spellbook
+	-- changes width when it switches between its small and full views.
 	panel:HookScript("OnShow", function()
 		QueueRefresh()
 		C_Timer.After(0, function()
-			if db.position == "side" then
-				PlaceColumn(bar)
-			end
+			Layout(bar)
 		end)
+	end)
+	panel:HookScript("OnSizeChanged", function()
+		Layout(bar)
 	end)
 	QueueRefresh()
 end
@@ -531,6 +654,15 @@ local function Setup()
 		header:SetAttribute("tome-last", db.last)
 	end
 
+	for _, tab in ipairs(TABS) do
+		if tab.available then
+			local button = _G[MicroButtonFor(tab)]
+			hooksecurefunc(button, "Enable", QueueSync)
+			hooksecurefunc(button, "Disable", QueueSync)
+		end
+	end
+	SyncEnabled()
+
 	local toggle = CreateFrame("Button", "TomeToggleButton", UIParent, "SecureActionButtonTemplate")
 	toggle:SetAttribute("type", "macro")
 	toggle:RegisterForClicks("AnyUp", "AnyDown")
@@ -570,6 +702,7 @@ events:SetScript("OnEvent", function(_, event, name)
 			Setup()
 		elseif pendingCombat then
 			pendingCombat = false
+			SyncEnabled()
 			AttachAll()
 			ApplyAllPositions()
 		end

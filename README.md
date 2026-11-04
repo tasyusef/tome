@@ -24,7 +24,9 @@ If you'd rather have the tabs down the right side, type `/tome side`, and `/tome
 
 - Guild, Collections, Group Finder and Talents don't load until the first time you open them. If that first time is in the middle of a fight, their tabs show up once combat ends.
 - Tome doesn't resize anything. Resizing windows in combat is exactly what the game blocks, so every window keeps its usual size.
-- Side tabs go on the right, under Blizzard's own tabs, because a few windows already use that edge.
+- A tab goes grey when the game hasn't opened that window to you yet, like Talents before your first talent point or Group Finder before its level. Hover it to see why. Clicking it does nothing, so you stay on the window you're on.
+- On a narrow window, like the small Spellbook, the top tabs drop their names and show just their icons. Hover one for its name.
+- Side tabs go on the right, beside Blizzard's own tabs, because a few windows already use that edge. On a short window they shrink to fit.
 - Moving the tabs between top and side waits until you're out of combat.
 
 ## Trying it out
