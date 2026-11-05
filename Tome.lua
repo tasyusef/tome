@@ -1,14 +1,19 @@
 -- Tome
 --
 -- Puts the same set of tabs on each Blizzard window it manages, so Character, Spellbook,
--- Talents, Guild, Collections and Group Finder work like one window. The Bags tab opens
--- your bags beside whichever window is up.
+-- Talents, Guild, Collections and Group Finder work like one window, with your bags as one
+-- more tab. They all open bottom right, where Blizzard opens the bags, one at a time.
 --
 -- Combat: in combat only Blizzard's own code may open these windows. So a tab never opens
 -- anything itself. Each tab is a secure macro button that /clicks the close button of
 -- whatever is open and then Blizzard's micro button for the target. A restricted snippet
 -- writes that macro at click time; it tells which window is open from small protected
 -- marker frames parented to each window.
+--
+-- Bags: the Bags tab is a window of Tome's own, opened and closed by restricted snippets so
+-- it works in combat too. Blizzard's bag windows still open and close as always, so anything
+-- that opens your bags (a vendor, the mailbox, the backpack button) still works, but they
+-- wait inside a hidden frame and Tome's window shows in their place.
 
 local ADDON_NAME = ...
 
@@ -22,7 +27,7 @@ local TABS = {
 		icon = "Interface\\Icons\\INV_Misc_Book_09" },
 	{ key = "talents", label = "Talents", button = "TalentMicroButton", fallback = "PlayerSpellsMicroButton",
 		frames = { "PlayerSpellsFrame" }, views = { "TalentsFrame", "SpecFrame" }, family = "playerspells" },
-	{ key = "bags", label = "Bags", button = "MainMenuBarBackpackButton", bags = true,
+	{ key = "bags", label = "Bags", button = "TomeBagsOpenButton", frames = { "TomeBagsFrame" },
 		icon = "Interface\\Icons\\INV_Misc_Bag_08" },
 	{ key = "guild", label = "Guild", button = "GuildMicroButton", frames = { "CommunitiesFrame" },
 		icon = "Interface\\Icons\\INV_Shirt_GuildTabard_01" },
@@ -45,12 +50,29 @@ local TOP_TAB_GAP = 2
 local COMPACT_TAB_WIDTH = 38 -- a top tab with just its icon
 local GEAR_ROOM = 30 -- the settings gear at the end of the row or column
 
+-- The Bags window: a grid of Blizzard's own bag slot buttons.
+local LAST_BAG = NUM_TOTAL_EQUIPPED_BAG_SLOTS or (NUM_BAG_SLOTS + (NUM_REAGENTBAG_SLOTS or 0))
+local SLOT_SIZE = 37
+local SLOT_GAP = 5
+local MIN_COLUMNS = 10
+local BAGS_TOP = 64 -- title, search box and sort button
+local BAGS_SIDE = 12
+local BAGS_BOTTOM = 36 -- your money
+
 local db
 local ready = false
 local pendingCombat = false
 local positionSetting, settingsCategory
-local bars = {} -- [window] = { panel, row, column, topTabs, sideTabs, rowWidth, columnHeight, sideX, sideY }
+local bars = {} -- [window] = { panel, row, column, topTabs, sideTabs, rowWidth, columnHeight, sideX, sideY, shownAt }
 local ourFrames = {} -- frames we parent to Blizzard windows; skipped when measuring their tabs
+local shownCount = 0 -- counts windows opening, so the newest one can win
+
+local bagsFrame -- the Bags window
+local bagSlots = {} -- [bag] = { holder, buttons, size }
+local bagsDirty = true
+local blizzardBags = {} -- [Blizzard's bag window] = the parent it has when it's showing
+local bagHolder -- hidden; Blizzard's bag windows wait in here
+local bagKeyButton
 
 BINDING_HEADER_TOME = "Tome"
 _G["BINDING_NAME_CLICK TomeToggleButton:LeftButton"] = "Open or close Tome"
@@ -64,26 +86,29 @@ header:SetAttribute("tome-last", DEFAULT_TAB)
 
 -- Before a tab's click: close every other open window, then press the target's micro
 -- button, unless the target is already the one showing. A tab whose micro button is off
--- does nothing, so it doesn't close the window you're on and then open nothing.
+-- does nothing, so it doesn't close the window you're on and then open nothing. The bags
+-- key sets `tome-toggle`, so pressing it on the Bags tab closes it again.
 local TAB_CLICK = [[
 	local want, family = self:GetAttribute("tome-key"), self:GetAttribute("tome-family")
 	if owner:GetAttribute("tome-off-" .. want) then
 		return false
 	end
-	local text, isOpen = "", false
+	local text, closer = "", nil
 	for i = 1, owner:GetAttribute("tome-views") do
 		local view = "tome-view" .. i
 		local marker = owner:GetFrameRef(view)
 		if marker and marker:IsVisible() then
 			if owner:GetAttribute(view .. "-key") == want then
-				isOpen = true
+				closer = owner:GetAttribute(view .. "-close")
 			elseif owner:GetAttribute(view .. "-family") ~= family then
 				text = text .. "/click " .. owner:GetAttribute(view .. "-close") .. "\n"
 			end
 		end
 	end
-	if not isOpen then
+	if not closer then
 		text = text .. "/click " .. self:GetAttribute("tome-open")
+	elseif self:GetAttribute("tome-toggle") then
+		text = text .. "/click " .. closer
 	end
 	if text == "" then
 		return false
@@ -137,17 +162,7 @@ end
 ----------------------------------------------------------------------------------------------
 -- Tab state
 
-local function BagsOpen()
-	if ContainerFrameCombinedBags and ContainerFrameCombinedBags:IsShown() then
-		return true
-	end
-	return IsBagOpen and IsBagOpen(0) or false
-end
-
 local function IsTabActive(tab, panel)
-	if tab.bags then
-		return BagsOpen()
-	end
 	if not tab.frames or not tContains(tab.frames, panel:GetName()) then
 		return false
 	end
@@ -253,7 +268,7 @@ local function SyncEnabled()
 		pendingCombat = true
 	else
 		for _, tab in ipairs(TABS) do
-			if tab.available and not tab.bags then
+			if tab.available then
 				header:SetAttribute("tome-off-" .. tab.key, IsTabOff(tab) or nil)
 			end
 		end
@@ -327,6 +342,49 @@ local function PlaceColumn(bar)
 	bar.column:SetPoint("TOPLEFT", panel, "TOPRIGHT", bar.sideX / scale, -bar.sideY / scale)
 end
 
+-- Where Blizzard opens the bags: bottom right, clear of the action bars on the right.
+local function BagSpot()
+	local x = 10
+	if EditModeUtil and EditModeUtil.GetRightActionBarWidth then
+		x = x + EditModeUtil:GetRightActionBarWidth()
+	end
+	return x, CONTAINER_OFFSET_Y or 85
+end
+
+-- Every Tome window sits in the bag spot, tabs included, and never past the top of the
+-- screen. Blizzard's windows go back to their own spot whenever Blizzard lays them out, so
+-- this runs again after that.
+local function PlaceWindow(bar)
+	local panel = bar.panel
+	if not panel:IsShown() and panel ~= bagsFrame then
+		return
+	end
+	local scale = panel:GetEffectiveScale() / UIParent:GetEffectiveScale()
+	local x, y = BagSpot()
+	local right = x / scale
+	local top = 0
+	if db.position == "side" then
+		right = right + bar.sideX + bar.column:GetWidth() * bar.column:GetScale()
+	else
+		top = TOP_TAB_HEIGHT
+	end
+	local bottom = math.max(0, math.min(y / scale, UIParent:GetHeight() / scale - panel:GetHeight() - top))
+	panel:ClearAllPoints()
+	panel:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -right, bottom)
+end
+
+-- Moving a window is blocked in combat, so one that opens mid-fight opens in Blizzard's
+-- spot and moves when combat ends.
+local function PlaceAll()
+	if InCombatLockdown() then
+		pendingCombat = true
+		return
+	end
+	for _, bar in pairs(bars) do
+		PlaceWindow(bar)
+	end
+end
+
 local function ApplyPosition(bar)
 	local onTop = db.position ~= "side"
 	bar.row:SetShown(onTop)
@@ -336,6 +394,7 @@ local function ApplyPosition(bar)
 	else
 		PlaceColumn(bar)
 	end
+	PlaceWindow(bar)
 end
 
 -- Moving or resizing the tabs is blocked in combat, so a window that opens or changes size
@@ -382,20 +441,403 @@ local function OpenSettingsMenu(owner)
 	end)
 end
 
+-- Tome is one window, so when one opens the rest close. Closing them is blocked in combat,
+-- so whatever opened mid-fight is tidied up when combat ends, keeping the newest.
+local function Tidy()
+	if InCombatLockdown() then
+		pendingCombat = true
+		return
+	end
+	local newest
+	for panel, bar in pairs(bars) do
+		if panel:IsShown() and (not newest or bar.shownAt > newest.shownAt) then
+			newest = bar
+		end
+	end
+	for panel, bar in pairs(bars) do
+		if bar ~= newest and panel:IsShown() then
+			if panel == bagsFrame then
+				panel:Hide()
+			else
+				HideUIPanel(panel)
+			end
+		end
+	end
+	PlaceAll()
+end
+
+local tidyQueued = false
+local function QueueTidy()
+	if not tidyQueued then
+		tidyQueued = true
+		C_Timer.After(0, function()
+			tidyQueued = false
+			Tidy()
+		end)
+	end
+end
+
+----------------------------------------------------------------------------------------------
+-- Bags window
+
+local function BagSize(bag)
+	if ContainerFrame_GetContainerNumSlots then
+		return (ContainerFrame_GetContainerNumSlots(bag)) -- counts the locked slots too
+	end
+	return C_Container.GetContainerNumSlots(bag)
+end
+
+local function BagSizesChanged()
+	for bag = 0, LAST_BAG do
+		if BagSize(bag) ~= bagSlots[bag].size then
+			return true
+		end
+	end
+	return false
+end
+
+-- The same steps Blizzard's bag windows take for each slot. Each button's bag is its
+-- holder's ID, so the slot's click stays Blizzard's own and works in combat.
+local function UpdateSlot(button, tooltipOwner)
+	local bag, slot = button:GetBagID(), button:GetID()
+	local info = C_Container.GetContainerItemInfo(bag, slot)
+	local questInfo = C_Container.GetContainerItemQuestInfo(bag, slot)
+	local texture = info and info.iconFileID
+	local quality = info and info.quality
+
+	ClearItemButtonOverlay(button)
+	button:SetHasItem(texture)
+	button:SetItemButtonTexture(texture)
+	button:SyncAppearanceWithHasItem()
+	SetItemButtonQuality(button, quality, info and info.hyperlink, false, info and info.isBound)
+	SetItemButtonCount(button, info and info.stackCount)
+	SetItemButtonDesaturated(button, info and info.isLocked)
+	button:UpdateExtended()
+	button:UpdateQuestItem(questInfo.isQuestItem, questInfo.questID, questInfo.isActive)
+	button:UpdateNewItem(quality)
+	button:UpdateJunkItem(quality, info and info.hasNoValue)
+	button:UpdateItemContextMatching()
+	button:UpdateCooldown(texture)
+	button:SetReadable(info and info.isReadable)
+	button:CheckUpdateTooltip(tooltipOwner)
+	button:SetMatchesSearch(not (info and info.isFiltered))
+end
+
+-- Every bag in one grid, backpack first, with the reagent bag on a row of its own.
+-- The window's size can't change in combat, so a bag swapped mid-fight shows afterwards.
+local function LayoutBags()
+	if InCombatLockdown() then
+		bagsDirty = true
+		pendingCombat = true
+		return
+	end
+	bagsDirty = false
+	local total = 0
+	for bag = 0, LAST_BAG do
+		total = total + BagSize(bag)
+	end
+	local columns = math.max(MIN_COLUMNS, math.ceil(math.sqrt(total)))
+	local step = SLOT_SIZE + SLOT_GAP
+	local column, row = 0, 0
+	for bag = 0, LAST_BAG do
+		local slots, size = bagSlots[bag], BagSize(bag)
+		if bag > NUM_BAG_SLOTS and size > 0 and column > 0 then
+			column, row = 0, row + 1
+		end
+		for slot = 1, size do
+			local button = slots.buttons[slot]
+			if not button then
+				button = CreateFrame("ItemButton", nil, slots.holder, "ContainerFrameItemButtonTemplate")
+				button:SetID(slot)
+				slots.buttons[slot] = button
+			end
+			button:ClearAllPoints()
+			button:SetPoint("TOPLEFT", bagsFrame, "TOPLEFT", BAGS_SIDE + column * step, -BAGS_TOP - row * step)
+			button:Show()
+			column = column + 1
+			if column == columns then
+				column, row = 0, row + 1
+			end
+		end
+		for slot = size + 1, #slots.buttons do
+			slots.buttons[slot]:Hide()
+		end
+		slots.size = size
+	end
+	local rows = math.max(1, row + (column > 0 and 1 or 0))
+	bagsFrame:SetSize(BAGS_SIDE * 2 + columns * step - SLOT_GAP, BAGS_TOP + rows * step - SLOT_GAP + BAGS_BOTTOM)
+end
+
+local function UpdateBags()
+	if bagsDirty or BagSizesChanged() then
+		LayoutBags()
+	end
+	local tooltipOwner = GameTooltip:GetOwner()
+	for bag = 0, LAST_BAG do
+		for _, button in ipairs(bagSlots[bag].buttons) do
+			if button:IsShown() then
+				UpdateSlot(button, tooltipOwner)
+			end
+		end
+	end
+end
+
+local bagUpdateQueued = false
+local function QueueBagUpdate()
+	if bagsFrame and bagsFrame:IsShown() and not bagUpdateQueued then
+		bagUpdateQueued = true
+		C_Timer.After(0, function()
+			bagUpdateQueued = false
+			if bagsFrame:IsShown() then
+				UpdateBags()
+			end
+		end)
+	end
+end
+
+local function CreateSortButton(parent)
+	local sort = CreateFrame("Button", nil, parent)
+	sort:SetSize(28, 26)
+	sort:SetNormalAtlas("bags-button-autosort-up")
+	sort:SetPushedAtlas("bags-button-autosort-down")
+	sort:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+	local highlight = sort:GetHighlightTexture()
+	highlight:ClearAllPoints()
+	highlight:SetSize(24, 23)
+	highlight:SetPoint("CENTER")
+	sort:SetScript("OnClick", function()
+		PlaySound(SOUNDKIT.UI_BAG_SORTING_01)
+		C_Container.SortBags()
+	end)
+	sort:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self)
+		GameTooltip_SetTitle(GameTooltip, BAG_CLEANUP_BAGS, HIGHLIGHT_FONT_COLOR)
+		GameTooltip_AddNormalLine(GameTooltip, BAG_CLEANUP_BAGS_DESCRIPTION)
+		GameTooltip:Show()
+	end)
+	sort:SetScript("OnLeave", GameTooltip_Hide)
+	return sort
+end
+
+-- The window and the two buttons the tabs and keys /click to open and close it. Both are
+-- restricted snippets, so they work in combat. While it's up, Escape closes it.
+local function CreateBagsWindow()
+	local frame = CreateFrame("Frame", "TomeBagsFrame", UIParent,
+		"PortraitFrameTemplateNoCloseButton, SecureHandlerShowHideTemplate")
+	frame:Hide()
+	bagsFrame = frame
+	frame:SetFrameStrata("MEDIUM")
+	frame:SetToplevel(true)
+	frame:EnableMouse(true)
+	frame:SetTitle("Bags")
+	frame:SetPortraitToAsset("Interface\\Icons\\INV_Misc_Bag_08")
+	frame:SetAttribute("_onshow", [[ self:SetBindingClick(true, "ESCAPE", "TomeBagsCloseButton") ]])
+	frame:SetAttribute("_onhide", [[ self:ClearBindings() ]])
+
+	local close = CreateFrame("Button", "TomeBagsCloseButton", frame,
+		"UIPanelCloseButtonNoScripts, SecureHandlerClickTemplate")
+	close:SetSize(24, 24)
+	close:SetPoint("TOPRIGHT", 1, 0)
+	close:SetFrameRef("bags", frame)
+	close:SetAttribute("_onclick", [[ self:GetFrameRef("bags"):Hide() ]])
+	frame.CloseButton = close
+
+	local open = CreateFrame("Button", "TomeBagsOpenButton", UIParent, "SecureHandlerClickTemplate")
+	open:SetFrameRef("bags", frame)
+	open:SetAttribute("_onclick", [[ self:GetFrameRef("bags"):Show() ]])
+
+	local sort = CreateSortButton(frame)
+	sort:SetPoint("TOPRIGHT", -9, -34)
+
+	local search = CreateFrame("EditBox", "TomeBagsSearchBox", frame, "BagSearchBoxTemplate")
+	search:SetHeight(20)
+	search:SetMaxLetters(15)
+	search:SetPoint("TOPLEFT", 66, -35)
+	search:SetPoint("RIGHT", sort, "LEFT", -8, 0)
+
+	local money = CreateFrame("Frame", "TomeBagsMoneyFrame", frame, "ContainerMoneyFrameTemplate")
+	money:SetHeight(16)
+	money:SetPoint("BOTTOMLEFT", 8, 8)
+	money:SetPoint("BOTTOMRIGHT", -8, 8)
+
+	for bag = 0, LAST_BAG do
+		local holder = CreateFrame("Frame", nil, frame)
+		holder:SetAllPoints()
+		holder:SetID(bag)
+		bagSlots[bag] = { holder = holder, buttons = {} }
+	end
+	LayoutBags()
+
+	frame:HookScript("OnShow", function()
+		PlaySound(SOUNDKIT.IG_BACKPACK_OPEN)
+		OpenAllBags()
+		UpdateBags()
+	end)
+	frame:HookScript("OnHide", function()
+		PlaySound(SOUNDKIT.IG_BACKPACK_CLOSE)
+		if IsAnyBagOpen() then
+			CloseAllBags()
+		end
+		for bag = 0, LAST_BAG do
+			for slot = 1, bagSlots[bag].size or 0 do
+				C_NewItems.RemoveNewItem(bag, slot)
+			end
+		end
+	end)
+
+	local events = CreateFrame("Frame")
+	for _, event in ipairs({ "BAG_UPDATE_DELAYED", "BAG_CONTAINER_UPDATE", "ITEM_LOCK_CHANGED", "BAG_UPDATE_COOLDOWN",
+		"INVENTORY_SEARCH_UPDATE", "BAG_NEW_ITEMS_UPDATED", "QUEST_ACCEPTED", "UNIT_QUEST_LOG_CHANGED",
+		"MERCHANT_SHOW", "MERCHANT_CLOSED", "PLAYER_ENTERING_WORLD" }) do
+		pcall(events.RegisterEvent, events, event)
+	end
+	events:SetScript("OnEvent", QueueBagUpdate)
+end
+
+----------------------------------------------------------------------------------------------
+-- Blizzard's bag windows
+
+local function IsOurBag(frame)
+	if frame == ContainerFrameCombinedBags then
+		return true
+	end
+	local id = frame:GetID()
+	return id >= 0 and id <= LAST_BAG
+end
+
+-- Ours wait in the holder unless `fallback` says they have to show as Blizzard's.
+local function PlaceBagWindow(frame, fallback)
+	local parent = frame:GetParent()
+	if parent ~= bagHolder then
+		blizzardBags[frame] = parent -- Blizzard moves them for full-screen views
+	end
+	local wanted = IsOurBag(frame) and not fallback and bagHolder or blizzardBags[frame]
+	if parent ~= wanted and not (InCombatLockdown() and frame:IsProtected()) then
+		if FrameUtil and FrameUtil.SetParentMaintainRenderLayering then
+			FrameUtil.SetParentMaintainRenderLayering(frame, wanted)
+		else
+			frame:SetParent(wanted)
+		end
+	end
+end
+
+-- Blizzard's bags open, Tome's window opens. Blizzard's close, Tome's closes. Showing Tome's
+-- window is blocked in combat, so bags opened mid-fight some other way than a Tome tab (the
+-- backpack button, say) come out of hiding and show as Blizzard's until combat ends.
+local backpackWasOpen = false
+local function SyncBags()
+	local open, backpackOpen = false, false
+	for frame in pairs(blizzardBags) do
+		if frame:IsShown() and IsOurBag(frame) then
+			open = true
+			if frame == ContainerFrameCombinedBags or frame:GetID() == 0 then
+				backpackOpen = true
+			end
+		end
+	end
+	-- The backpack button only closes the backpack, and in one window that should be all of it.
+	if backpackWasOpen and not backpackOpen and open then
+		CloseAllBags()
+		open = false
+	end
+	backpackWasOpen = backpackOpen
+
+	if open ~= bagsFrame:IsShown() then
+		if InCombatLockdown() then
+			pendingCombat = true
+		else
+			bagsFrame:SetShown(open)
+		end
+	end
+
+	local fallback = open and not bagsFrame:IsShown()
+	for frame in pairs(blizzardBags) do
+		PlaceBagWindow(frame, fallback)
+	end
+end
+
+local bagSyncQueued = false
+local function QueueBagSync()
+	if not bagSyncQueued then
+		bagSyncQueued = true
+		C_Timer.After(0, function()
+			bagSyncQueued = false
+			SyncBags()
+		end)
+	end
+end
+
+-- Blizzard reuses its bag windows for the bank too, so each one is moved the moment it
+-- shows, before it's drawn.
+local function OnBagWindowShown(frame)
+	PlaceBagWindow(frame, InCombatLockdown() and not bagsFrame:IsShown())
+	QueueBagSync()
+end
+
+-- Their OnShow and OnHide don't run while they're hidden away, so watch Show and Hide.
+local function HideBlizzardBags()
+	bagHolder = CreateFrame("Frame", nil, UIParent)
+	bagHolder:SetAllPoints()
+	bagHolder:Hide()
+	local frames = { ContainerFrameCombinedBags }
+	for i = 1, NUM_CONTAINER_FRAMES or 0 do
+		frames[#frames + 1] = _G["ContainerFrame" .. i]
+	end
+	for _, frame in pairs(frames) do
+		blizzardBags[frame] = frame:GetParent()
+		hooksecurefunc(frame, "Show", OnBagWindowShown)
+		hooksecurefunc(frame, "Hide", QueueBagSync)
+		hooksecurefunc(frame, "SetShown", function(self, shown)
+			if shown then
+				OnBagWindowShown(self)
+			else
+				QueueBagSync()
+			end
+		end)
+	end
+	for _, name in ipairs({ "ContainerFrame_SetFullScreenFrame", "ContainerFrame_ClearFullScreenFrame" }) do
+		if _G[name] then
+			hooksecurefunc(name, QueueBagSync)
+		end
+	end
+	bagsFrame:HookScript("OnShow", QueueBagSync)
+	bagsFrame:HookScript("OnHide", QueueBagSync)
+end
+
+-- Your bag keys open the Bags tab. Override bindings can't change in combat.
+local boundKeys
+local function BindBagKeys()
+	if InCombatLockdown() then
+		pendingCombat = true
+		return
+	end
+	local keys = {}
+	for _, action in ipairs({ "OPENALLBAGS", "TOGGLEBACKPACK" }) do
+		for _, key in ipairs({ GetBindingKey(action) }) do
+			keys[#keys + 1] = key
+		end
+	end
+	local list = table.concat(keys, " ")
+	if list == boundKeys then
+		return -- setting them fires UPDATE_BINDINGS again
+	end
+	boundKeys = list
+	ClearOverrideBindings(bagKeyButton)
+	for _, key in ipairs(keys) do
+		SetOverrideBindingClick(bagKeyButton, false, key, "TomeBagsKeyButton", "LeftButton")
+	end
+end
+
 ----------------------------------------------------------------------------------------------
 -- Building the tabs
 
 local function SetupTabAction(button, tab)
 	button:RegisterForClicks("AnyUp", "AnyDown")
 	button:SetAttribute("type", "macro")
-	if tab.bags then
-		button:SetAttribute("macrotext", "/click " .. tab.button)
-	else
-		button:SetAttribute("tome-key", tab.key)
-		button:SetAttribute("tome-family", tab.family or tab.key)
-		button:SetAttribute("tome-open", MicroButtonFor(tab))
-		header:WrapScript(button, "OnClick", TAB_CLICK)
-	end
+	button:SetAttribute("tome-key", tab.key)
+	button:SetAttribute("tome-family", tab.family or tab.key)
+	button:SetAttribute("tome-open", MicroButtonFor(tab))
+	header:WrapScript(button, "OnClick", TAB_CLICK)
 end
 
 local function AddTopTabArt(button, layer, atlases, leftX, rightX, isHighlight)
@@ -484,7 +926,7 @@ local function CreateGearButton(parent)
 end
 
 local function CreateBar(panel)
-	local bar = { panel = panel, topTabs = {}, sideTabs = {}, sideX = 0, sideY = 30 }
+	local bar = { panel = panel, topTabs = {}, sideTabs = {}, sideX = 0, sideY = 30, shownAt = 0 }
 
 	-- Along the top, starting right of the portrait; FitRow sets its width.
 	local row = CreateFrame("Frame", nil, panel)
@@ -553,6 +995,12 @@ local function AddView(tab, parent, closer)
 	header:SetAttribute("tome-views", count) -- last, so a snippet never sees half a view
 end
 
+local function MarkShown(bar)
+	shownCount = shownCount + 1
+	bar.shownAt = shownCount
+	QueueTidy()
+end
+
 local function Attach(panelName)
 	local panel = _G[panelName]
 	if not panel or bars[panel] then
@@ -577,10 +1025,17 @@ local function Attach(panelName)
 	local bar = CreateBar(panel)
 	bars[panel] = bar
 	Layout(bar)
+	if panel:IsShown() then
+		MarkShown(bar) -- a window that loads the first time it opens is already up
+	end
 	-- Blizzard's own side tabs settle a frame after the window shows, and the Spellbook
 	-- changes width when it switches between its small and full views.
 	panel:HookScript("OnShow", function()
+		MarkShown(bar)
 		QueueRefresh()
+		if not InCombatLockdown() then
+			PlaceWindow(bar)
+		end
 		C_Timer.After(0, function()
 			Layout(bar)
 		end)
@@ -643,10 +1098,12 @@ local function Setup()
 		return
 	end
 
+	CreateBagsWindow() -- first, since the Bags tab presses its open button
+
 	for _, tab in ipairs(TABS) do
 		local button = MicroButtonFor(tab)
 		tab.available = button ~= nil
-		if button and not tab.bags then
+		if button then
 			header:SetAttribute("tome-open-" .. tab.key, button)
 		end
 	end
@@ -668,16 +1125,26 @@ local function Setup()
 	toggle:RegisterForClicks("AnyUp", "AnyDown")
 	header:WrapScript(toggle, "OnClick", TOGGLE_CLICK)
 
-	for _, name in ipairs({ "ContainerFrameCombinedBags", "ContainerFrame1" }) do
-		local frame = _G[name]
-		if frame then
-			frame:HookScript("OnShow", QueueRefresh)
-			frame:HookScript("OnHide", QueueRefresh)
+	for _, tab in ipairs(TABS) do
+		if tab.key == "bags" then
+			bagKeyButton = CreateFrame("Button", "TomeBagsKeyButton", UIParent, "SecureActionButtonTemplate")
+			bagKeyButton:SetAttribute("tome-toggle", true)
+			SetupTabAction(bagKeyButton, tab)
+		end
+	end
+
+	HideBlizzardBags()
+	for _, name in ipairs({ "ShowUIPanel", "HideUIPanel", "UpdateUIPanelPositions", "UpdateScaleForFitForOpenPanels",
+		"MaximizeUIPanel", "RestoreUIPanelArea", "UpdateContainerFrameAnchors" }) do
+		if _G[name] then
+			hooksecurefunc(name, PlaceAll)
 		end
 	end
 
 	ready = true
 	AttachAll()
+	BindBagKeys()
+	SyncBags()
 end
 
 local events = CreateFrame("Frame")
@@ -685,6 +1152,9 @@ events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:RegisterEvent("PLAYER_LOGOUT")
+events:RegisterEvent("UPDATE_BINDINGS")
+events:RegisterEvent("UI_SCALE_CHANGED")
+events:RegisterEvent("DISPLAY_SIZE_CHANGED")
 events:SetScript("OnEvent", function(_, event, name)
 	if event == "ADDON_LOADED" then
 		if name == ADDON_NAME then
@@ -705,6 +1175,20 @@ events:SetScript("OnEvent", function(_, event, name)
 			SyncEnabled()
 			AttachAll()
 			ApplyAllPositions()
+			if bagsDirty then
+				LayoutBags()
+			end
+			SyncBags()
+			Tidy()
+			BindBagKeys()
+		end
+	elseif event == "UPDATE_BINDINGS" then
+		if ready then
+			BindBagKeys()
+		end
+	elseif event == "UI_SCALE_CHANGED" or event == "DISPLAY_SIZE_CHANGED" then
+		if ready then
+			PlaceAll()
 		end
 	elseif event == "PLAYER_LOGOUT" then
 		db.last = header:GetAttribute("tome-last")
