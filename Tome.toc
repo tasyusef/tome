@@ -1,7 +1,7 @@
 ## Interface: 16001, 120100, 120105, 120107
 ## Title: Tome
-## Notes: One window for your character, spellbook, talents, guild, collections, group finder and bags, with tabs to switch between them. Opens bottom right and works in combat.
-## Version: 0.2.0
+## Notes: One window for everything on the menu bar, plus your bags, with tabs to switch between them. Opens bottom right, moves in Edit Mode and works in combat.
+## Version: 0.2.1
 ## X-License: GPL-3.0-or-later
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
 ## SavedVariablesPerCharacter: TomeCharDB

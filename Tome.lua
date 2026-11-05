@@ -1,8 +1,8 @@
 -- Tome
 --
--- Puts the same set of tabs on each Blizzard window it manages, so Character, Spellbook,
--- Talents, Guild, Collections and Group Finder work like one window, with your bags as one
--- more tab. They all open bottom right, where Blizzard opens the bags, one at a time.
+-- Puts the same set of tabs on each window the menu bar opens, so Character, Professions,
+-- the Spellbook and the rest work like one window, with your bags as one more tab. They all
+-- open bottom right, where Blizzard opens the bags, one at a time. Edit Mode moves that spot.
 --
 -- Combat: in combat only Blizzard's own code may open these windows. So a tab never opens
 -- anything itself. Each tab is a secure macro button that /clicks the close button of
@@ -20,21 +20,33 @@ local ADDON_NAME = ...
 -- `button` is the micro button the tab presses, `frames` the window(s) that button opens,
 -- and `views` the children that tell apart tabs sharing one window (Spellbook and Talents
 -- both live in PlayerSpellsFrame, hence the shared `family`).
+-- In the menu bar's order. The shop, the game menu and Help aren't windows Tome can put tabs
+-- on, so they stay on the menu bar only.
 local TABS = {
 	{ key = "character", label = "Character", button = "CharacterMicroButton", frames = { "CharacterFrame" } },
+	{ key = "professions", label = "Professions", button = "ProfessionMicroButton", frames = { "ProfessionsFrame" },
+		icon = "Interface\\Icons\\Trade_BlackSmithing" },
 	{ key = "spellbook", label = "Spellbook", button = "SpellbookMicroButton", fallback = "PlayerSpellsMicroButton",
 		frames = { "PlayerSpellsFrame" }, views = { "SpellBookFrame" }, family = "playerspells",
 		icon = "Interface\\Icons\\INV_Misc_Book_09" },
 	{ key = "talents", label = "Talents", button = "TalentMicroButton", fallback = "PlayerSpellsMicroButton",
 		frames = { "PlayerSpellsFrame" }, views = { "TalentsFrame", "SpecFrame" }, family = "playerspells" },
-	{ key = "bags", label = "Bags", button = "TomeBagsOpenButton", frames = { "TomeBagsFrame" },
-		icon = "Interface\\Icons\\INV_Misc_Bag_08" },
+	{ key = "legacy", label = "Legacy", button = "LegacyMicroButton", frames = { "LegacySystemFrame" },
+		icon = "Interface\\Icons\\Achievement_General" },
+	{ key = "quests", label = "Quest Log", button = "QuestLogMicroButton", frames = { "WorldMapFrame" },
+		icon = "Interface\\Icons\\INV_Misc_Map_01" },
+	{ key = "housing", label = "Housing", button = "HousingMicroButton", frames = { "HousingDashboardFrame" },
+		icon = "Interface\\Icons\\INV_Misc_Rune_01" },
 	{ key = "guild", label = "Guild", button = "GuildMicroButton", frames = { "CommunitiesFrame" },
 		icon = "Interface\\Icons\\INV_Shirt_GuildTabard_01" },
-	{ key = "collections", label = "Collections", button = "CollectionsMicroButton", frames = { "CollectionsJournal" },
-		icon = "Interface\\Icons\\Ability_Mount_RidingHorse" },
 	{ key = "group", label = "Group Finder", button = "LFDMicroButton", frames = { "PVEFrame", "LFGParentFrame" },
 		icon = "Interface\\Icons\\INV_Misc_GroupNeedMore" },
+	{ key = "collections", label = "Collections", button = "CollectionsMicroButton", frames = { "CollectionsJournal" },
+		icon = "Interface\\Icons\\Ability_Mount_RidingHorse" },
+	{ key = "journal", label = "Adventure Guide", button = "EJMicroButton", frames = { "EncounterJournal" },
+		icon = "Interface\\Icons\\INV_Misc_Head_Dragon_01" },
+	{ key = "bags", label = "Bags", button = "TomeBagsOpenButton", frames = { "TomeBagsFrame" },
+		icon = "Interface\\Icons\\INV_Misc_Bag_08" },
 }
 
 local POSITIONS = {
@@ -43,12 +55,17 @@ local POSITIONS = {
 }
 
 local DEFAULT_TAB = "character"
-local TOP_TAB_HEIGHT = 26
+local TOP_TAB_HEIGHT = 30
 local TOP_ART_SCALE = 0.75 -- Blizzard's top tabs reuse the bottom-tab art, flipped, at 75% height
+local TOP_ART_STRETCH = 1.15 -- ours are a little taller, to fit bigger icons
+local TOP_ICON_SIZE = 20
+local TOP_TAB_PADDING = 11 -- either side of a top tab's icon and name
 local TOP_ROW_LEFT = 58 -- the row starts right of the window's portrait
 local TOP_TAB_GAP = 2
-local COMPACT_TAB_WIDTH = 38 -- a top tab with just its icon
+local COMPACT_TAB_WIDTH = TOP_ICON_SIZE + TOP_TAB_PADDING * 2 -- a top tab with just its icon
+local MIN_ROW_SCALE = 0.7 -- a squeezed row's icons stay at least 14 pixels, their old size
 local GEAR_ROOM = 30 -- the settings gear at the end of the row or column
+local CORNERS = { TOPLEFT = true, TOPRIGHT = true, BOTTOMLEFT = true, BOTTOMRIGHT = true }
 
 -- The Bags window: a grid of Blizzard's own bag slot buttons.
 local LAST_BAG = NUM_TOTAL_EQUIPPED_BAG_SLOTS or (NUM_BAG_SLOTS + (NUM_REAGENTBAG_SLOTS or 0))
@@ -291,10 +308,12 @@ end
 -- Tab position
 
 -- Labels and icons where the window is wide enough for the whole row, otherwise just the
--- icons, with each label in its tooltip.
+-- icons, with each label in its tooltip. If even that's too wide the row shrinks, down to
+-- MIN_ROW_SCALE, and past that it runs on beyond the window's right edge.
 local function FitRow(bar)
-	local compact = bar.rowWidth > bar.panel:GetWidth() - TOP_ROW_LEFT
-	local width = 0
+	local room = bar.panel:GetWidth() - TOP_ROW_LEFT
+	local compact = bar.rowWidth > room
+	local width = GEAR_ROOM
 	for _, tab in ipairs(TABS) do
 		local button = bar.topTabs[tab]
 		if button then
@@ -303,7 +322,13 @@ local function FitRow(bar)
 			width = width + button:GetWidth() + TOP_TAB_GAP
 		end
 	end
-	bar.row:SetSize(width + GEAR_ROOM, TOP_TAB_HEIGHT)
+	local scale = math.max(MIN_ROW_SCALE, math.min(1, room / width))
+	local row = bar.row
+	row:SetScale(scale)
+	row:SetSize(width, TOP_TAB_HEIGHT)
+	row:ClearAllPoints()
+	row:SetPoint("BOTTOMLEFT", bar.panel, "TOPLEFT", TOP_ROW_LEFT / scale, -2 / scale)
+	bar.rowOverhang = math.max(0, width * scale - room)
 end
 
 -- Forever's windows keep Blizzard's own tabs down their right edge (Character, Collections,
@@ -351,26 +376,51 @@ local function BagSpot()
 	return x, CONTAINER_OFFSET_Y or 85
 end
 
--- Every Tome window sits in the bag spot, tabs included, and never past the top of the
--- screen. Blizzard's windows go back to their own spot whenever Blizzard lays them out, so
--- this runs again after that.
+-- The screen corner Tome's windows grow from and how far in from it they sit, in UIParent's
+-- units. That's the bag spot until you move it in Edit Mode.
+local function WindowSpot()
+	local spot = db.spot
+	if spot then
+		return spot.point, spot.x, spot.y
+	end
+	local x, y = BagSpot()
+	return "BOTTOMRIGHT", x, y
+end
+
+-- The room a window's tabs take on its right and on its top, in the window's units.
+local function TabRoom(bar)
+	if db.position == "side" then
+		return bar.sideX + bar.column:GetWidth() * bar.column:GetScale(), 0
+	end
+	return bar.rowOverhang or 0, TOP_TAB_HEIGHT * bar.row:GetScale()
+end
+
+-- The world map can fill the screen. Then it stays where Blizzard puts it, without tabs.
+local function IsFullScreen(panel)
+	return panel.IsMaximized ~= nil and panel:IsMaximized()
+end
+
+-- Every Tome window sits in the same spot, tabs included, and stays on screen. Blizzard's
+-- windows go back to their own spot whenever Blizzard lays them out, so this runs again
+-- after that.
 local function PlaceWindow(bar)
 	local panel = bar.panel
-	if not panel:IsShown() and panel ~= bagsFrame then
+	if not panel:IsShown() and panel ~= bagsFrame or IsFullScreen(panel) then
 		return
 	end
 	local scale = panel:GetEffectiveScale() / UIParent:GetEffectiveScale()
-	local x, y = BagSpot()
-	local right = x / scale
-	local top = 0
-	if db.position == "side" then
-		right = right + bar.sideX + bar.column:GetWidth() * bar.column:GetScale()
-	else
-		top = TOP_TAB_HEIGHT
+	local point, x, y = WindowSpot()
+	local side, top = TabRoom(bar)
+	x = math.max(0, math.min(x / scale, UIParent:GetWidth() / scale - panel:GetWidth() - side))
+	y = math.max(0, math.min(y / scale, UIParent:GetHeight() / scale - panel:GetHeight() - top))
+	if point:find("RIGHT") then
+		x = -(x + side)
 	end
-	local bottom = math.max(0, math.min(y / scale, UIParent:GetHeight() / scale - panel:GetHeight() - top))
+	if point:find("TOP") then
+		y = -(y + top)
+	end
 	panel:ClearAllPoints()
-	panel:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -right, bottom)
+	panel:SetPoint(point, UIParent, point, x, y)
 end
 
 -- Moving a window is blocked in combat, so one that opens mid-fight opens in Blizzard's
@@ -387,8 +437,9 @@ end
 
 local function ApplyPosition(bar)
 	local onTop = db.position ~= "side"
-	bar.row:SetShown(onTop)
-	bar.column:SetShown(not onTop)
+	local shown = not IsFullScreen(bar.panel)
+	bar.row:SetShown(onTop and shown)
+	bar.column:SetShown(not onTop and shown)
 	if onTop then
 		FitRow(bar)
 	else
@@ -475,6 +526,207 @@ local function QueueTidy()
 			Tidy()
 		end)
 	end
+end
+
+----------------------------------------------------------------------------------------------
+-- Edit Mode
+
+-- In Edit Mode a box stands in for Tome's windows, the size of the last one you opened.
+-- Drag it to move where they open, or click it to change the tabs or put it back. The spot
+-- is saved as soon as you let go, not with Blizzard's layout.
+
+local mover, moverDialog
+local editModeHooked = false
+
+-- Blizzard's own selection art: blue while Edit Mode is open, yellow once clicked.
+local MOVER_LAYOUT = {
+	TopLeftCorner = { atlas = "%s-NineSlice-Corner", mirrorLayout = true, x = -8, y = 8 },
+	TopRightCorner = { atlas = "%s-NineSlice-Corner", mirrorLayout = true, x = 8, y = 8 },
+	BottomLeftCorner = { atlas = "%s-NineSlice-Corner", mirrorLayout = true, x = -8, y = -8 },
+	BottomRightCorner = { atlas = "%s-NineSlice-Corner", mirrorLayout = true, x = 8, y = -8 },
+	TopEdge = { atlas = "_%s-NineSlice-EdgeTop" },
+	BottomEdge = { atlas = "_%s-NineSlice-EdgeBottom" },
+	LeftEdge = { atlas = "!%s-NineSlice-EdgeLeft" },
+	RightEdge = { atlas = "!%s-NineSlice-EdgeRight" },
+	Center = { atlas = "%s-NineSlice-Center", x = -8, y = 8, x1 = 8, y1 = -8 },
+}
+local MOVER_ART = "editmode-actionbar-highlight"
+local MOVER_SELECTED_ART = "editmode-actionbar-selected"
+
+-- The window the box stands in for: the last one opened, or the character sheet. A full
+-- screen map doesn't count, since it doesn't open in Tome's spot.
+local function NewestBar()
+	local newest = bars[CharacterFrame]
+	for _, bar in pairs(bars) do
+		if (not newest or bar.shownAt > newest.shownAt) and not IsFullScreen(bar.panel) then
+			newest = bar
+		end
+	end
+	return newest
+end
+
+-- The box sits where that window would, tabs and all, with its settings beside it.
+local function PlaceMover()
+	local width, height = 384, 512
+	local bar = NewestBar()
+	if bar then
+		local panel = bar.panel
+		local scale = panel:GetEffectiveScale() / UIParent:GetEffectiveScale()
+		local side, top = TabRoom(bar)
+		width, height = (panel:GetWidth() + side) * scale, (panel:GetHeight() + top) * scale
+	end
+	local point, x, y = WindowSpot()
+	x = math.max(0, math.min(x, UIParent:GetWidth() - width))
+	y = math.max(0, math.min(y, UIParent:GetHeight() - height))
+	local onRight = point:find("RIGHT")
+	mover:SetSize(width, height)
+	mover:ClearAllPoints()
+	mover:SetPoint(point, UIParent, point, onRight and -x or x, point:find("TOP") and -y or y)
+
+	moverDialog:ClearAllPoints()
+	if onRight then
+		moverDialog:SetPoint("TOPRIGHT", mover, "TOPLEFT", -12, 0)
+	else
+		moverDialog:SetPoint("TOPLEFT", mover, "TOPRIGHT", 12, 0)
+	end
+	moverDialog.side:SetChecked(db.position == "side")
+end
+
+-- The spot is kept from the screen corner nearest the box, so the windows grow away from it.
+local function SaveMoverSpot()
+	local left, right, bottom, top = mover:GetLeft(), mover:GetRight(), mover:GetBottom(), mover:GetTop()
+	local width, height = UIParent:GetWidth(), UIParent:GetHeight()
+	local onRight = left + right > width
+	local onTop = bottom + top > height
+	db.spot = {
+		point = (onTop and "TOP" or "BOTTOM") .. (onRight and "RIGHT" or "LEFT"),
+		x = math.floor((onRight and width - right or left) + 0.5),
+		y = math.floor((onTop and height - top or bottom) + 0.5),
+	}
+	PlaceMover()
+	PlaceAll()
+end
+
+local function ResetSpot()
+	db.spot = nil
+	PlaceMover()
+	PlaceAll()
+end
+
+local function DeselectMover()
+	if mover.selected then
+		mover.selected = false
+		NineSliceUtil.ApplyLayout(mover, MOVER_LAYOUT, MOVER_ART)
+		moverDialog:Hide()
+	end
+end
+
+-- One thing is selected at a time, so clicking the box lets go of Blizzard's selection.
+local function SelectMover()
+	if mover.selected then
+		return
+	end
+	if not InCombatLockdown() then
+		EditModeManagerFrame:ClearSelectedSystem()
+	end
+	mover.selected = true
+	NineSliceUtil.ApplyLayout(mover, MOVER_LAYOUT, MOVER_SELECTED_ART)
+	moverDialog:Show()
+end
+
+local function ShowMover()
+	if not editModeHooked then
+		editModeHooked = true
+		hooksecurefunc(EditModeManagerFrame, "SelectSystem", DeselectMover)
+		hooksecurefunc(EditModeManagerFrame, "ClearSelectedSystem", DeselectMover)
+	end
+	DeselectMover()
+	PlaceMover()
+	mover:Show()
+end
+
+local function HideMover()
+	DeselectMover()
+	mover:Hide()
+end
+
+local function CreateMoverDialog()
+	local dialog = CreateFrame("Frame", nil, mover)
+	dialog:Hide()
+	dialog:SetSize(260, 136)
+	dialog:SetFrameStrata("DIALOG")
+	dialog:SetClampedToScreen(true)
+	dialog:EnableMouse(true)
+	CreateFrame("Frame", nil, dialog, "DialogBorderTranslucentTemplate"):SetAllPoints()
+	moverDialog = dialog
+
+	local title = dialog:CreateFontString(nil, "ARTWORK", "GameFontHighlightLarge")
+	title:SetPoint("TOP", 0, -15)
+	title:SetText("Tome")
+
+	local close = CreateFrame("Button", nil, dialog, "UIPanelCloseButtonNoScripts")
+	close:SetPoint("TOPRIGHT")
+	close:SetScript("OnClick", DeselectMover)
+
+	local side = CreateFrame("CheckButton", nil, dialog, "UICheckButtonTemplate")
+	side:SetPoint("TOPLEFT", 20, -42)
+	side.Text:SetFontObject("GameFontHighlight")
+	side.Text:SetText("Tabs down the side")
+	side:SetScript("OnClick", function(self)
+		SetPosition(self:GetChecked() and "side" or "top")
+		PlaceMover()
+	end)
+	dialog.side = side
+
+	local reset = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+	reset:SetSize(200, 28)
+	reset:SetPoint("BOTTOM", 0, 18)
+	reset:SetText(HUD_EDIT_MODE_RESET_POSITION or "Reset To Default Position")
+	reset:SetScript("OnClick", ResetSpot)
+end
+
+local function CreateMover()
+	mover = CreateFrame("Frame", "TomeMover", UIParent, "NineSliceCodeTemplate")
+	mover:Hide()
+	mover:SetFrameStrata("MEDIUM")
+	mover:SetFrameLevel(1000)
+	mover:SetToplevel(true)
+	mover:SetMovable(true)
+	mover:SetClampedToScreen(true)
+	mover:SetDontSavePosition(true)
+	mover:EnableMouse(true)
+	mover:RegisterForDrag("LeftButton")
+	NineSliceUtil.ApplyLayout(mover, MOVER_LAYOUT, MOVER_ART)
+
+	local hover = CreateFrame("Frame", nil, mover, "NineSliceCodeTemplate")
+	hover:SetAllPoints()
+	hover:SetAlpha(0.4)
+	hover:Hide()
+	NineSliceUtil.ApplyLayout(hover, MOVER_LAYOUT, MOVER_ART)
+	hover:SetBlendMode("ADD")
+
+	local label = mover:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+	label:SetPoint("CENTER")
+	label:SetText("Tome")
+
+	mover:SetScript("OnEnter", function()
+		hover:Show()
+	end)
+	mover:SetScript("OnLeave", function()
+		hover:Hide()
+	end)
+	mover:SetScript("OnMouseDown", SelectMover)
+	mover:SetScript("OnDragStart", function(self)
+		self:StartMoving()
+	end)
+	mover:SetScript("OnDragStop", function(self)
+		self:StopMovingOrSizing()
+		SaveMoverSpot()
+	end)
+	CreateMoverDialog()
+
+	EventRegistry:RegisterCallback("EditMode.Enter", ShowMover, mover)
+	EventRegistry:RegisterCallback("EditMode.Exit", HideMover, mover)
 end
 
 ----------------------------------------------------------------------------------------------
@@ -846,7 +1098,7 @@ local function AddTopTabArt(button, layer, atlases, leftX, rightX, isHighlight)
 		local texture = button:CreateTexture(nil, layer)
 		texture:SetAtlas(atlas, true)
 		texture:SetTexCoord(0, 1, 1, 1 - TOP_ART_SCALE)
-		texture:SetHeight(texture:GetHeight() * TOP_ART_SCALE)
+		texture:SetHeight(texture:GetHeight() * TOP_ART_SCALE * TOP_ART_STRETCH)
 		if isHighlight then
 			texture:SetBlendMode("ADD")
 			texture:SetAlpha(0.4)
@@ -872,8 +1124,8 @@ local function CreateTopTab(row, tab)
 	AddTopTabArt(button, "HIGHLIGHT", TAB_ART, -3, 7, true)
 
 	button.Icon = button:CreateTexture(nil, "ARTWORK")
-	button.Icon:SetSize(14, 14)
-	button.Icon:SetPoint("LEFT", 12, 0)
+	button.Icon:SetSize(TOP_ICON_SIZE, TOP_ICON_SIZE)
+	button.Icon:SetPoint("LEFT", TOP_TAB_PADDING, 0)
 	SetTabIcon(button.Icon, tab)
 	button.Icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
@@ -881,7 +1133,7 @@ local function CreateTopTab(row, tab)
 	button.Text:SetPoint("LEFT", button.Icon, "RIGHT", 4, 0)
 	button.Text:SetText(tab.label)
 
-	button.fullWidth = math.ceil(button.Text:GetStringWidth()) + 42
+	button.fullWidth = math.ceil(button.Text:GetStringWidth()) + TOP_ICON_SIZE + 4 + TOP_TAB_PADDING * 2
 	button:SetSize(button.fullWidth, TOP_TAB_HEIGHT)
 	SetTopTabSelected(button, false, false)
 	SetupTabAction(button, tab)
@@ -1099,11 +1351,14 @@ local function Setup()
 	end
 
 	CreateBagsWindow() -- first, since the Bags tab presses its open button
+	CreateMover()
 
+	-- A micro button the game leaves off the menu bar (for a feature switched off in this
+	-- game mode) still exists, but the menu bar never gave it a layoutIndex.
 	for _, tab in ipairs(TABS) do
 		local button = MicroButtonFor(tab)
-		tab.available = button ~= nil
-		if button then
+		tab.available = button ~= nil and (tab.key == "bags" or _G[button].layoutIndex ~= nil)
+		if tab.available then
 			header:SetAttribute("tome-open-" .. tab.key, button)
 		end
 	end
@@ -1161,6 +1416,10 @@ events:SetScript("OnEvent", function(_, event, name)
 			TomeCharDB = TomeCharDB or {}
 			db = TomeCharDB
 			db.position = db.position == "side" and "side" or "top"
+			local spot = db.spot
+			if type(spot) ~= "table" or not CORNERS[spot.point] or type(spot.x) ~= "number" or type(spot.y) ~= "number" then
+				db.spot = nil
+			end
 			RegisterSettings()
 		elseif ready then
 			C_Timer.After(0, AttachAll)
