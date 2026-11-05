@@ -1299,25 +1299,6 @@ SlashCmdList.TOME = function(message)
 		SetLocked(false)
 	elseif message == "reset" then
 		ResetSpot()
-	elseif message == "probe" then -- DEV PROBE, remove before release
-		local function p(f)
-			if not f then return "nil" end
-			local a, b = f:IsProtected()
-			return string.format("%s shown=%s prot=%s/%s %dx%d s=%.2f l=%s t=%s", f:GetName() or "?", tostring(f:IsShown()),
-				tostring(a), tostring(b), f:GetWidth(), f:GetHeight(), f:GetScale(), tostring(f:GetLeft()), tostring(f:GetTop()))
-		end
-		print(p(anchor), "spot", spotX, spotY, "rail", rail:GetWidth(), rail:GetHeight())
-		for _, button in pairs(railTabs) do
-			local icon = button.Icon
-			print("tab icon", icon:GetTexture(), icon:IsShown(), icon:GetWidth(), button.Mask and button.Mask:GetAtlas())
-			break
-		end
-		for panel, window in pairs(windows) do
-			print(p(panel), "full", tostring(window.full), "left", window.left, "lvl", panel:GetFrameLevel(),
-				"area", panel:GetAttribute("UIPanelLayout-area"), "x", panel:GetAttribute("UIPanelLayout-xoffset"),
-				"y", panel:GetAttribute("UIPanelLayout-yoffset"), "fit", panel:GetAttribute("UIPanelLayout-checkFit"))
-		end
-		print("combat", InCombatLockdown(), "ui", UIParent:GetWidth(), UIParent:GetHeight(), UIParent:GetScale())
 	elseif settingsCategory then
 		Settings.OpenToCategory(settingsCategory:GetID())
 	end
@@ -1402,7 +1383,7 @@ events:SetScript("OnEvent", function(_, event, name)
 		if name == ADDON_NAME then
 			TomeCharDB = TomeCharDB or {}
 			db = TomeCharDB
-			db.position, db.width, db.height = nil, nil, nil -- from older versions
+			db.position, db.width, db.height, db.devlog = nil, nil, nil, nil -- from older versions
 			local spot = db.spot
 			if type(spot) ~= "table" or spot.point ~= "TOPLEFT" or type(spot.x) ~= "number" or type(spot.y) ~= "number" then
 				db.spot = nil
@@ -1444,73 +1425,3 @@ events:SetScript("OnEvent", function(_, event, name)
 		db.last = header:GetAttribute("tome-last")
 	end
 end)
-
-----------------------------------------------------------------------------------------------
--- DEV LOG, remove before release. Saved to TomeCharDB.devlog on /reload or logout.
-
-do
-	local log
-	local function Log(...)
-		if not log then return end
-		local parts = {}
-		for i = 1, select("#", ...) do
-			parts[#parts + 1] = tostring((select(i, ...)))
-		end
-		log[#log + 1] = string.format("%.2f %s %s", GetTime(), InCombatLockdown() and "COMBAT" or "-", table.concat(parts, " "))
-		if #log > 400 then table.remove(log, 1) end
-	end
-	local function Name(frame)
-		return frame and (frame:GetName() or "?") or "nil"
-	end
-	local function Install()
-		local bags = { ContainerFrameCombinedBags }
-		for i = 1, NUM_CONTAINER_FRAMES or 0 do
-			bags[#bags + 1] = _G["ContainerFrame" .. i]
-		end
-		for _, frame in ipairs(bags) do
-			hooksecurefunc(frame, "Show", function(self)
-				Log("bag Show", Name(self), "id", self:GetID(), "parent", Name(self:GetParent()), "visible", self:IsVisible())
-			end)
-			hooksecurefunc(frame, "Hide", function(self) Log("bag Hide", Name(self)) end)
-		end
-		TomeBagsFrame:HookScript("OnShow", function() Log("TomeBags OnShow") end)
-		TomeBagsFrame:HookScript("OnHide", function() Log("TomeBags OnHide") end)
-		TomeAnchor:HookScript("OnShow", function() Log("TomeAnchor OnShow") end)
-		TomeAnchor:HookScript("OnHide", function() Log("TomeAnchor OnHide") end)
-		TomeBagsKeyButton:HookScript("OnClick", function(self, button, down)
-			Log("key click", button, "down", down, "macro", (self:GetAttribute("macrotext") or ""):gsub("\n", " | "))
-		end)
-		for _, name in ipairs(BAG_BUTTONS) do
-			local button = _G[name]
-			if button then
-				button:HookScript("OnClick", function(_, mouse) Log("click", name, mouse) end)
-			end
-		end
-		for _, name in ipairs({ "ToggleBackpack", "ToggleAllBags", "OpenAllBags", "CloseAllBags", "ToggleBag" }) do
-			if _G[name] then
-				hooksecurefunc(name, function(...) Log("call", name, ...) end)
-			end
-		end
-		Log("installed", "keys", GetBindingKey("TOGGLEBACKPACK"), GetBindingKey("OPENALLBAGS"),
-			"combined", C_CVar and C_CVar.GetCVar("combinedBags"))
-	end
-	local f = CreateFrame("Frame")
-	for _, event in ipairs({ "PLAYER_LOGIN", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED",
-		"ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
-		f:RegisterEvent(event)
-	end
-	f:SetScript("OnEvent", function(_, event, ...)
-		if event == "PLAYER_LOGIN" then
-			TomeCharDB.devlog = {}
-			log = TomeCharDB.devlog
-			C_Timer.After(1, Install)
-		else
-			Log(event, ...)
-		end
-	end)
-	local oldHandler = geterrorhandler()
-	seterrorhandler(function(message, ...)
-		Log("ERROR", message)
-		return oldHandler(message, ...)
-	end)
-end

@@ -1,7 +1,7 @@
 ## Interface: 16001, 120100, 120105, 120107
 ## Title: Tome
-## Notes: One window for everything on the menu bar, plus your bags, with tabs to switch between them. Opens bottom right, moves in Edit Mode and works in combat.
-## Version: 0.2.1
+## Notes: Tabs down the left for everything on the menu bar, plus your bags. Each window opens beside them at its usual size. Drag to move, and it works in combat.
+## Version: 0.2.2
 ## X-License: GPL-3.0-or-later
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
 ## SavedVariablesPerCharacter: TomeCharDB
