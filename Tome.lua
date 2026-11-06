@@ -1,15 +1,15 @@
 -- Tome
 --
--- One set of tabs for everything on the menu bar, plus your bags. The tabs run down the left
--- side and stay put. Whichever tab you pick opens right beside them at its usual size, so
--- only the window's far edges move. Drag a window by an empty spot, or drag the gear under
--- the tabs, to move them all.
+-- One row of tabs for everything on the menu bar, plus your bags. The row runs along the top
+-- and stays put. Whichever tab you pick opens right under it at its usual size, so only the
+-- window's far edges move. Drag a window by an empty spot, or drag the gear at the end of
+-- the row, to move them all.
 --
 -- Combat: in combat only Blizzard's own code may open these windows. So a tab never opens
 -- anything itself. Each tab is a secure macro button that /clicks the close button of
 -- whatever is open and then Blizzard's micro button for the target. A restricted snippet
 -- writes that macro at click time; it tells which window is open from small protected
--- marker frames parented to each window. The same markers put a window beside the tabs
+-- marker frames parented to each window. The same markers put a window under the tabs
 -- when it shows, and Blizzard's own layout is told the same spot, so that works in combat too.
 --
 -- Bags: the Bags tab is a window of Tome's own, opened and closed by restricted snippets so
@@ -52,14 +52,16 @@ local TABS = {
 }
 
 local DEFAULT_TAB = "character"
-local RAIL_X = 1 -- the tabs tuck under the window's border by this much
-local RAIL_TOP = 54 -- the first tab starts below the window's portrait
-local GEAR_ROOM = 30 -- the settings gear below the tabs
-local MAX_OVERHANG = 64 -- the most a window's own bits may stick out past its left edge
+local TAB_HEIGHT = 40
+local TAB_WIDTH = 48 -- just the icon; the name is in its tooltip, so the row fits small windows
+local TAB_GAP = 2
+local ICON_SIZE = 28
+local ART_CROP = 0.75 -- Blizzard's top tabs reuse the bottom-tab art, flipped, at 75% height
+local ROW_LEFT = 58 -- the row starts right of the window's portrait
+local ROW_TUCK = 2 -- and tucks under the window's top border by this much
+local GEAR_ROOM = 30 -- the settings gear at the end of the row
+local KEEP_ON_SCREEN = 100 -- how much of the window stays on screen below the row
 local MOVE_THRESHOLD = 3 -- a click that moves less than this isn't a drag
-
--- Left of a window's edge but not its content, so they don't push it away from the tabs.
-local CHROME = { "NineSlice", "PortraitContainer", "TitleContainer", "TopTileStreaks", "CloseButton", "Bg" }
 
 -- The Bags window: a grid of Blizzard's own bag slot buttons.
 local LAST_BAG = NUM_TOTAL_EQUIPPED_BAG_SLOTS or (NUM_BAG_SLOTS + (NUM_REAGENTBAG_SLOTS or 0))
@@ -79,11 +81,10 @@ local db
 local ready = false
 local pendingCombat = false
 local settingsCategory, lockSetting
-local anchor, rail -- the top left corner every window opens at, and the tabs beside it
+local anchor, row -- the top left corner every window opens at, and the tabs above it
 local spotX, spotY = 0, 0 -- where the anchor is: from the screen's left and top, in UIParent's units
-local railTabs = {} -- [tab] = button
-local windows = {} -- [panel] = { panel, markers, ours, full, shownAt, left }
-local ourFrames = {} -- frames we parent to Blizzard windows; skipped when measuring them
+local rowTabs = {} -- [tab] = button
+local windows = {} -- [panel] = { panel, markers, ours, full, shownAt }
 local shownCount = 0 -- counts windows opening, so the newest one can win
 local wrappedBagButtons = {}
 
@@ -163,7 +164,7 @@ local TOGGLE_CLICK = [[
 	self:SetAttribute("macrotext", text)
 ]]
 
--- A window showed: the tabs show, and the window goes right beside them at its own size.
+-- A window showed: the tabs show, and the window goes right under them at its own size.
 -- In combat Tome can't tidy up afterwards, so any other window that's open closes now. A full
 -- screen map keeps Blizzard's own spot.
 local SHOW = [[
@@ -186,7 +187,7 @@ local SHOW = [[
 	anchor:Show()
 	anchor:Raise()
 	panel:ClearAllPoints()
-	panel:SetPoint("TOPLEFT", anchor, "TOPLEFT", self:GetAttribute("tome-left") or 0, 0)
+	panel:SetPoint("TOPLEFT", anchor, "TOPLEFT")
 	panel:Raise()
 ]]
 
@@ -296,7 +297,17 @@ local function VisibleMarker(window)
 	end
 end
 
--- The window beside the tabs: the newest one open.
+local function SetTabSelected(button, selected, off)
+	for _, piece in ipairs(button.active) do
+		piece:SetShown(selected)
+	end
+	for _, piece in ipairs(button.inactive) do
+		piece:SetShown(not selected)
+	end
+	button.Icon:SetDesaturated(off)
+end
+
+-- The window under the tabs: the newest one open.
 local function ActiveWindow()
 	local active
 	for panel, window in pairs(windows) do
@@ -310,12 +321,11 @@ end
 
 local function Refresh()
 	local active = ActiveWindow()
-	for tab, button in pairs(railTabs) do
+	for tab, button in pairs(rowTabs) do
 		if tab.key == "character" then
 			SetTabIcon(button.Icon, tab)
 		end
-		button:SetChecked(active ~= nil and IsTabActive(tab, active.panel))
-		button.Icon:SetDesaturated(IsTabOff(tab))
+		SetTabSelected(button, active ~= nil and IsTabActive(tab, active.panel), IsTabOff(tab))
 	end
 end
 
@@ -362,61 +372,15 @@ local function QueueSync()
 end
 
 ----------------------------------------------------------------------------------------------
--- Putting windows beside the tabs
+-- Putting windows under the tabs
 
 -- The world map can fill the screen. Then it keeps Blizzard's look and spot, without tabs.
 local function IsFullScreen(panel)
 	return panel == WorldMapFrame and panel.IsMaximized ~= nil and panel:IsMaximized()
 end
 
-local function ChromeOf(panel)
-	local pieces = {}
-	for _, owner in ipairs({ panel, panel.BorderFrame or false }) do
-		if owner then
-			for _, key in ipairs(CHROME) do
-				if type(owner[key]) == "table" then
-					pieces[owner[key]] = true
-				end
-			end
-		end
-	end
-	return pieces
-end
-
--- How far a window's own tabs and buttons stick out past its left edge, in its own units,
--- so they don't cover Tome's tabs. Anything big is the window's content, not a tab.
-local function MeasureLeft(window)
-	local panel = window.panel
-	local left = panel:GetLeft()
-	if not left then
-		return 0
-	end
-	local chrome = ChromeOf(panel)
-	local scale = panel:GetEffectiveScale()
-	local out = 0
-	local function consider(frame)
-		if ourFrames[frame] or chrome[frame] or not frame:IsVisible() or frame:GetAlpha() == 0 then
-			return
-		end
-		local x, _, w, h = frame:GetRect()
-		if not x or w > 150 and h > 150 then
-			return
-		end
-		out = math.max(out, left - x * frame:GetEffectiveScale() / scale)
-	end
-	for _, child in ipairs({ panel:GetChildren() }) do
-		consider(child)
-		if not ourFrames[child] and not chrome[child] then
-			for _, grandchild in ipairs({ child:GetChildren() }) do
-				consider(grandchild)
-			end
-		end
-	end
-	return math.min(MAX_OVERHANG, math.ceil(out))
-end
-
 -- Blizzard puts its windows back in their own spot whenever it lays them out, in combat too.
--- So each window's layout settings point at the spot beside the tabs, and Blizzard's own
+-- So each window's layout settings point at the spot under the tabs, and Blizzard's own
 -- layout lands it there as well. This works before a window has ever opened.
 local function SyncLayout(window)
 	local panel = window.panel
@@ -426,12 +390,11 @@ local function SyncLayout(window)
 		return -- Blizzard doesn't lay this one out
 	end
 	local ratio = panel:GetEffectiveScale() / UIParent:GetEffectiveScale()
-	local left = spotX + (window.left or 0) * ratio
 	local width = panel:GetWidth() * ratio
 	local values = {
-		xoffset = left - (GetUIPanelLayoutAttribute("LEFT_OFFSET") or 16),
+		xoffset = spotX - (GetUIPanelLayoutAttribute("LEFT_OFFSET") or 16),
 		yoffset = -spotY - (GetUIPanelLayoutAttribute("TOP_OFFSET") or -116),
-		centerXOffset = (left + width / 2 - UIParent:GetWidth() / 2) / ratio,
+		centerXOffset = (spotX + width / 2 - UIParent:GetWidth() / 2) / ratio,
 		bottomClampOverride = -10000,
 		minYOffset = 0,
 	}
@@ -450,16 +413,12 @@ local function Fit(window)
 	if not marker then
 		return
 	end
-	window.left = window.ours and 0 or MeasureLeft(window)
-	for _, each in ipairs(window.markers) do
-		each:SetAttribute("tome-left", window.left)
-	end
 	SyncLayout(window)
 	marker:Execute(SHOW)
 end
 
 -- The map going full screen leaves the tabs, at Blizzard's spot. Shrunk back down, it goes
--- back beside them.
+-- back under them.
 local function UpdateFullScreen(window)
 	local full = IsFullScreen(window.panel)
 	if full == window.full then
@@ -554,13 +513,14 @@ end
 ----------------------------------------------------------------------------------------------
 -- Where the tabs are, and moving them
 
--- Where Blizzard opens its windows, with the tabs to their left.
+-- Where Blizzard opens its windows. The tabs fit in the room above.
 local function DefaultSpot()
 	local x = GetUIPanelLayoutAttribute("LEFT_OFFSET") or 16
 	local y = -(GetUIPanelLayoutAttribute("TOP_OFFSET") or -116)
-	return x + (rail and rail:GetWidth() or 0) - RAIL_X, y
+	return x, y
 end
 
+-- The whole row stays on screen, and so does the top of the window.
 local function ApplySpot()
 	local x, y
 	if db.spot then
@@ -568,10 +528,9 @@ local function ApplySpot()
 	else
 		x, y = DefaultSpot()
 	end
-	local railWidth = rail:GetWidth() - RAIL_X
-	local railBottom = RAIL_TOP + rail:GetHeight()
-	spotX = math.max(railWidth, math.min(x, UIParent:GetWidth() - 100))
-	spotY = math.max(0, math.min(y, UIParent:GetHeight() - railBottom))
+	local rowRight = ROW_LEFT + row:GetWidth()
+	spotX = math.max(0, math.min(x, UIParent:GetWidth() - rowRight))
+	spotY = math.max(TAB_HEIGHT - ROW_TUCK, math.min(y, UIParent:GetHeight() - KEEP_ON_SCREEN))
 	anchor:ClearAllPoints()
 	anchor:SetPoint("TOPLEFT", UIParent, "TOPLEFT", spotX, -spotY)
 end
@@ -683,7 +642,7 @@ local function OpenSettingsMenu(owner)
 end
 
 -- Explicitly protected, so the markers' snippets can show it, hide it and put Blizzard's
--- windows beside it in combat. It's a dot at the windows' top left corner.
+-- windows under it in combat. It's a dot at the windows' top left corner.
 local function CreateAnchor()
 	anchor = CreateFrame("Frame", "TomeAnchor", UIParent, "SecureFrameTemplate")
 	anchor:Hide()
@@ -704,43 +663,51 @@ local function SetupTabAction(button, tab)
 	header:WrapScript(button, "OnClick", TAB_CLICK)
 end
 
--- Blizzard's side tab art faces right. Tome's tabs are on the left, so it's flipped.
-local function MirrorTexture(texture)
-	local atlas = texture:GetAtlas()
-	local info = atlas and C_Texture.GetAtlasInfo(atlas)
-	if not info then
-		return
+-- Blizzard's top tabs are its bottom-tab art flipped and cut to 75% height. Tome's are
+-- taller, to fit bigger icons.
+local TAB_ART = { "uiframe-tab-left", "_uiframe-tab-center", "uiframe-tab-right" }
+local ACTIVE_TAB_ART = { "uiframe-activetab-left", "_uiframe-activetab-center", "uiframe-activetab-right" }
+
+local function AddTabArt(button, layer, atlases, leftX, rightX, isHighlight)
+	local pieces = {}
+	for i, atlas in ipairs(atlases) do
+		local texture = button:CreateTexture(nil, layer)
+		texture:SetAtlas(atlas, true)
+		texture:SetTexCoord(0, 1, 1, 1 - ART_CROP)
+		texture:SetHeight(TAB_HEIGHT)
+		if isHighlight then
+			texture:SetBlendMode("ADD")
+			texture:SetAlpha(0.4)
+		end
+		pieces[i] = texture
 	end
-	local width, height = texture:GetSize()
-	texture:SetTexture(info.file or info.filename)
-	texture:SetTexCoord(info.rightTexCoord, info.leftTexCoord, info.topTexCoord, info.bottomTexCoord)
-	texture:SetSize(width, height)
+	local left, middle, right = pieces[1], pieces[2], pieces[3]
+	left:SetPoint("BOTTOMLEFT", leftX, 0)
+	right:SetPoint("BOTTOMRIGHT", rightX, 0)
+	middle:SetPoint("TOPLEFT", left, "TOPRIGHT")
+	middle:SetPoint("TOPRIGHT", right, "TOPLEFT")
+	middle:SetHorizTile(true)
+	return pieces
 end
 
--- The icon moves to the flipped tab's middle. Its mask can't be flipped, so it moves with
--- the icon instead and the icon keeps Blizzard's exact shape.
-local function CreateRailTab(parent, tab)
-	local button = CreateFrame("Button", nil, parent, "LargeSideTabButtonTemplate, SecureActionButtonTemplate")
-	for _, key in ipairs({ "Background", "SelectedTexture", "TabGlow", "HighlightTexture" }) do
-		if button[key] then
-			pcall(MirrorTexture, button[key])
-		end
-	end
-	local x = -button:GetIconAnchorOffsetsForTabArt()
-	function button:GetFinalIconAnchorOffsets()
-		return x, 0
-	end
-	button:InitializeIconAnchoring()
-	if button.Mask then
-		button.Mask:ClearAllPoints()
-		button.Mask:SetPoint("CENTER", button.Icon, "CENTER", x, 0)
-	end
+-- Just the icon, with the tab's name in its tooltip.
+local function CreateTab(parent, tab)
+	local button = CreateFrame("Button", nil, parent, "SecureActionButtonTemplate")
+	button:SetSize(TAB_WIDTH, TAB_HEIGHT)
+	button.inactive = AddTabArt(button, "BACKGROUND", TAB_ART, -3, 7)
+	button.active = AddTabArt(button, "BACKGROUND", ACTIVE_TAB_ART, -1, 8)
+	AddTabArt(button, "HIGHLIGHT", TAB_ART, -3, 7, true)
+
+	button.Icon = button:CreateTexture(nil, "ARTWORK")
+	button.Icon:SetSize(ICON_SIZE, ICON_SIZE)
+	button.Icon:SetPoint("CENTER", 0, ROW_TUCK / 2) -- the middle of the part that shows
 	SetTabIcon(button.Icon, tab)
-	button:SetFillToInterior(true)
-	button:SetChecked(false)
+	button.Icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+	SetTabSelected(button, false, false)
 	SetupTabAction(button, tab)
 	button:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_LEFT", 4, -4)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
 		SetTabTooltip(GameTooltip, tab)
 		GameTooltip:Show()
 	end)
@@ -764,7 +731,7 @@ local function CreateGearButton(parent)
 	end)
 	gear:SetScript("OnDragStop", StopMove)
 	gear:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 		GameTooltip:SetText("Tome")
 		GameTooltip:AddLine("Click for settings. Drag to move the tabs.", 1, 1, 1, true)
 		GameTooltip:Show()
@@ -773,29 +740,29 @@ local function CreateGearButton(parent)
 	return gear
 end
 
--- Down the left of whichever window is open, always in the same spot.
-local function CreateRail()
-	rail = CreateFrame("Frame", nil, anchor)
-	local height, width, previous = 0, 0, nil
+-- Along the top of whichever window is open, always in the same spot. A window narrower
+-- than the row leaves the end of the row hanging past its right edge.
+local function CreateRow()
+	row = CreateFrame("Frame", nil, anchor)
+	local width, previous = 0, nil
 	for _, tab in ipairs(TABS) do
 		if tab.available then
-			local button = CreateRailTab(rail, tab)
+			local button = CreateTab(row, tab)
 			if previous then
-				button:SetPoint("TOPRIGHT", previous, "BOTTOMRIGHT")
+				button:SetPoint("BOTTOMLEFT", previous, "BOTTOMRIGHT", TAB_GAP, 0)
 			else
-				button:SetPoint("TOPRIGHT")
+				button:SetPoint("BOTTOMLEFT")
 			end
-			height = height + button:GetHeight()
-			width = button:GetWidth()
-			railTabs[tab] = button
+			width = width + TAB_WIDTH + TAB_GAP
+			rowTabs[tab] = button
 			previous = button
 		end
 	end
-	CreateGearButton(rail):SetPoint("TOP", previous, "BOTTOM", 3, -6)
-	rail:SetSize(width, height + GEAR_ROOM)
-	rail:SetPoint("TOPRIGHT", anchor, "TOPLEFT", RAIL_X, -RAIL_TOP)
-	-- The tabs stay on screen, and so does a bit of the window.
-	anchor:SetClampRectInsets(-(width - RAIL_X), -100, 0, -(RAIL_TOP + height + GEAR_ROOM))
+	CreateGearButton(row):SetPoint("LEFT", previous, "RIGHT", 6, 0)
+	row:SetSize(width + GEAR_ROOM, TAB_HEIGHT)
+	row:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT", ROW_LEFT, -ROW_TUCK)
+	-- The whole row stays on screen while you drag, and so does the top of the window.
+	anchor:SetClampRectInsets(0, ROW_LEFT + row:GetWidth(), TAB_HEIGHT - ROW_TUCK, -KEEP_ON_SCREEN)
 end
 
 ----------------------------------------------------------------------------------------------
@@ -1189,7 +1156,7 @@ end
 -- Blizzard's windows
 
 -- A marker is a small protected frame inside a window, so snippets can tell it's open and
--- put it beside the tabs when it shows.
+-- put it under the tabs when it shows.
 local function AddView(tab, parent, closer, window)
 	local marker = CreateFrame("Frame", nil, parent, "SecureHandlerShowHideTemplate")
 	marker:SetSize(1, 1)
@@ -1201,7 +1168,6 @@ local function AddView(tab, parent, closer, window)
 	marker:SetAttribute("_onhide", HIDE)
 	marker:HookScript("OnShow", QueueRefresh)
 	marker:HookScript("OnHide", QueueRefresh)
-	ourFrames[marker] = true
 	window.markers[#window.markers + 1] = marker
 
 	local count = header:GetAttribute("tome-views") + 1
@@ -1224,7 +1190,7 @@ local function Attach(panelName)
 	if not panel or windows[panel] then
 		return
 	end
-	local window = { panel = panel, markers = {}, ours = panel == bagsFrame, full = false, shownAt = 0, left = 0 }
+	local window = { panel = panel, markers = {}, ours = panel == bagsFrame, full = false, shownAt = 0 }
 	windows[panel] = window
 
 	for _, tab in ipairs(TABS) do
@@ -1330,7 +1296,7 @@ local function Setup()
 		header:SetAttribute("tome-last", db.last)
 	end
 
-	CreateRail()
+	CreateRow()
 	ApplySpot()
 
 	for _, tab in ipairs(TABS) do
